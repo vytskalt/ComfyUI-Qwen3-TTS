@@ -1,6 +1,6 @@
-# [WIP] ComfyUI Qwen3-TTS
+# ComfyUI Qwen3-TTS
 
-A ComfyUI custom node suite for [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS), supporting 1.7B and 0.6B models, Custom Voice, Voice Design, and Voice Cloning.
+A ComfyUI custom node suite for [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS), supporting 1.7B and 0.6B models, Custom Voice, Voice Design, Voice Cloning and Fine-Tuning.
 
 ## Features
 
@@ -18,7 +18,7 @@ A ComfyUI custom node suite for [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)
 1.  Clone this repository into your `ComfyUI/custom_nodes` folder:
     ```bash
     cd ComfyUI/custom_nodes
-    git clone https://github.com/your-username/ComfyUI-Qwen3-TTS.git
+    git clone https://github.com/DarioFT/ComfyUI-Qwen3-TTS.git
     ```
 2.  Install dependencies:
     ```bash
