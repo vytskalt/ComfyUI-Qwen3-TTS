@@ -5,6 +5,7 @@ import torch
 import soundfile as sf
 import numpy as np
 import folder_paths
+import comfy.model_management as mm
 from qwen_tts import Qwen3TTSModel, Qwen3TTSTokenizer
 from .dataset import TTSDataset
 from accelerate import Accelerator
@@ -95,7 +96,7 @@ class Qwen3Loader:
     CATEGORY = "Qwen3-TTS"
 
     def load_model(self, repo_id, source, precision, attention, local_model_path=""):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = mm.get_torch_device()
         
         dtype = torch.float32
         if precision == "bf16":
@@ -509,7 +510,7 @@ class Qwen3DataPrep:
     CATEGORY = "Qwen3-TTS/FineTuning"
 
     def process(self, jsonl_path, tokenizer_repo):
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        device = mm.get_torch_device()
         
         output_path = jsonl_path.replace(".jsonl", "_codes.jsonl")
         
@@ -585,8 +586,9 @@ class Qwen3FineTune:
         # We must disable it and enable gradients properly for the entire scope, including model loading.
         with torch.inference_mode(mode=False):
             with torch.enable_grad():
-                # Accelerator setup
-                accelerator = Accelerator(gradient_accumulation_steps=4, mixed_precision=mixed_precision)
+                # Accelerator setup - respect ComfyUI's --cpu flag
+                use_cpu = mm.cpu_mode()
+                accelerator = Accelerator(gradient_accumulation_steps=4, mixed_precision=mixed_precision, cpu=use_cpu)
                 
                 print(f"Loading base model: {init_model}")
                 
