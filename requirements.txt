@@ -8,4 +8,3 @@ accelerate
 librosa
 tensorboard
 safetensors
-bitsandbytes
