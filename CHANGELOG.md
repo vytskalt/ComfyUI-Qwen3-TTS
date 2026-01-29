@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-01-29
+
+### Added
+- `local_model_path` parameter to Audio Compare node (fixes #21)
+- Step-based checkpoint saving with `save_every_steps` parameter
+- `log_every_steps` parameter for training progress control
+- Learning rate display in training progress output
+
+### Changed
+- Replaced `keep_intermediate_checkpoints` with `save_every_epochs` and `save_every_steps` for finer control
+- Training progress now shows optimizer steps (accounts for gradient accumulation)
+- Step counting uses `math.ceil()` to prevent 0 steps for small datasets
+
+### Fixed
+- Audio Compare cache now correctly invalidates when switching `local_model_path`
+- Step-based logging/saving now triggers at correct intervals with gradient accumulation
+
+### Contributors
+- @rekuenkdr - local_model_path fix, step-based checkpointing
+
 ## [1.6.0] - 2026-01-27
 
 ### Added

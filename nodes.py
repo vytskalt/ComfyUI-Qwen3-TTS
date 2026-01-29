@@ -6,6 +6,7 @@ import contextlib
 import io
 import logging
 import hashlib
+import math
 from datetime import datetime, timezone
 import soundfile as sf
 import numpy as np
@@ -1107,8 +1108,8 @@ class Qwen3FineTune:
                     else:
                         print("Using standard AdamW (8-bit optimizer disabled)")
 
-                # Calculate total training steps for THIS run
-                num_update_steps_per_epoch = len(train_dataloader) // gradient_accumulation
+                # Calculate total training steps for THIS run (use ceil to avoid 0 for small datasets)
+                num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation)
                 total_training_steps = num_update_steps_per_epoch * epochs
 
                 # Determine warmup steps (explicit steps take priority over ratio)
@@ -1218,10 +1219,10 @@ class Qwen3FineTune:
                     print(f"Checkpoint saved: {ckpt_path}")
                     return ckpt_path
 
-                # Calculate total steps and global step counter
-                total_steps_per_epoch = len(train_dataloader)
-                total_steps = total_steps_per_epoch * end_epoch
-                global_step = start_epoch * total_steps_per_epoch  # Resume from correct step
+                # Calculate total optimizer steps and global step counter
+                # Use num_update_steps_per_epoch (optimizer steps) not len(train_dataloader) (micro-batches)
+                total_optimizer_steps = num_update_steps_per_epoch * end_epoch
+                global_step = start_epoch * num_update_steps_per_epoch  # Resume from correct optimizer step
 
                 for epoch in range(start_epoch, end_epoch):
                     epoch_loss = 0
@@ -1320,26 +1321,30 @@ class Qwen3FineTune:
                             
                             epoch_loss += loss.item()
                             steps += 1
-                            global_step += 1
 
-                            # Show step progress periodically
-                            if global_step % log_every_steps == 0:
-                                lr_val = optimizer.param_groups[0]['lr']
-                                status = f"Step {global_step}/{total_steps}, Loss: {loss.item():.4f}, LR: {lr_val:.8f}"
-                                print(status)
-                                send_status(status)
+                            # Only count optimizer steps (after gradient accumulation completes)
+                            if accelerator.sync_gradients:
+                                global_step += 1
 
-                            # Save checkpoint every N steps (if enabled)
-                            if save_every_steps > 0 and global_step % save_every_steps == 0:
-                                send_status(f"Saving checkpoint step {global_step}...")
-                                save_checkpoint(f"step_{global_step}")
+                                # Show step progress periodically
+                                if log_every_steps > 0 and global_step % log_every_steps == 0:
+                                    lr_val = optimizer.param_groups[0]['lr']
+                                    status = f"Step {global_step}/{total_optimizer_steps}, Loss: {loss.item():.4f}, LR: {lr_val:.8f}"
+                                    print(status)
+                                    send_status(status)
+
+                                # Save checkpoint every N steps (if enabled)
+                                if save_every_steps > 0 and global_step % save_every_steps == 0:
+                                    send_status(f"Saving checkpoint step {global_step}...")
+                                    save_checkpoint(f"step_{global_step}")
 
                     avg_loss = epoch_loss/steps if steps > 0 else 0
                     print(f"Epoch {epoch + 1}/{end_epoch} - Avg Loss: {avg_loss}")
                     send_status(f"Epoch {epoch + 1}/{end_epoch} - Loss: {avg_loss:.4f}")
 
-                    # Save checkpoint every N epochs, or always save final epoch
-                    should_save = ((epoch + 1) % save_every_epochs == 0) or ((epoch + 1) == end_epoch)
+                    # Save checkpoint every N epochs (if enabled), or always save final epoch
+                    is_final_epoch = (epoch + 1) == end_epoch
+                    should_save = is_final_epoch or (save_every_epochs > 0 and (epoch + 1) % save_every_epochs == 0)
                     if should_save:
                         send_status(f"Saving checkpoint epoch {epoch + 1}...")
                         save_checkpoint(f"epoch_{epoch + 1}")
@@ -1390,15 +1395,15 @@ class Qwen3AudioCompare:
         from safetensors.torch import load_file
         from qwen_tts.core.models.modeling_qwen3_tts import Qwen3TTSSpeakerEncoder
 
-        # Check if already cached
-        if Qwen3AudioCompare._speaker_encoder is not None and Qwen3AudioCompare._speaker_encoder_model == model_repo:
-            return Qwen3AudioCompare._speaker_encoder
-
         # Get local model path - use provided path if non-empty, otherwise fall back to default
         if local_model_path and local_model_path.strip():
-            model_path = local_model_path.strip()
+            model_path = os.path.abspath(local_model_path.strip())
         else:
             model_path = get_local_model_path(model_repo)
+
+        # Check if already cached (use resolved path as cache key)
+        if Qwen3AudioCompare._speaker_encoder is not None and Qwen3AudioCompare._speaker_encoder_model == model_path:
+            return Qwen3AudioCompare._speaker_encoder
         if not os.path.exists(model_path):
             raise ValueError(f"Base model not found at {model_path}. Please download it first using Qwen3-TTS Loader.")
 
@@ -1432,9 +1437,9 @@ class Qwen3AudioCompare:
         device = mm.get_torch_device()
         speaker_encoder = speaker_encoder.to(device)
 
-        # Cache it
+        # Cache it (use resolved path as key)
         Qwen3AudioCompare._speaker_encoder = speaker_encoder
-        Qwen3AudioCompare._speaker_encoder_model = model_repo
+        Qwen3AudioCompare._speaker_encoder_model = model_path
 
         print(f"Loaded speaker encoder from {model_repo} ({len(speaker_weights)} weights)")
         return speaker_encoder
