@@ -1371,16 +1371,18 @@ class Qwen3FineTune:
                             codec_0_labels = batch['codec_0_labels']
                             codec_mask = batch['codec_mask']
                             
-                            speaker_embedding = model.speaker_encoder(ref_mels.to(model.device).to(model.dtype)).detach()
+                            # Unwrap model to access attributes (DDP/FSDP wrappers hide them)
+                            unwrapped_model = accelerator.unwrap_model(model)
+
+                            speaker_embedding = unwrapped_model.speaker_encoder(ref_mels.to(model.device).to(model.dtype)).detach()
                             if target_speaker_embedding is None:
                                 target_speaker_embedding = speaker_embedding
-                                
+
                             input_text_ids = input_ids[:, :, 0]
                             input_codec_ids = input_ids[:, :, 1]
-                            
-                            # Use model directly (accelerator unwraps attributes automatically usually)
-                            # If model is DDP, it might fail, but for single GPU Comfy it should pass attributes.
-                            current_model = model
+
+                            # Use unwrapped model for attribute access (DDP/FSDP wrappers hide them)
+                            current_model = unwrapped_model
                             
                             # Debug Gradient Flow
                             if steps == 0 and epoch == start_epoch:
