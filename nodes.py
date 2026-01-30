@@ -939,8 +939,8 @@ class Qwen3FineTune:
                  # Workflow
                  "resume_training": ("BOOLEAN", {"default": False, "tooltip": "Continue training from the latest checkpoint in output_dir."}),
                  "log_every_steps": ("INT", {"default": 10, "min": 1, "max": 1000, "tooltip": "Log training progress every N steps."}),
-                 "save_every_epochs": ("INT", {"default": 1, "min": 1, "max": 100, "tooltip": "Save checkpoint every N epochs. Set to 1 to save every epoch."}),
-                 "save_every_steps": ("INT", {"default": 0, "min": 0, "max": 100000, "tooltip": "Save checkpoint every N steps. Set to 0 to disable step-based saving."}),
+                 "save_every_epochs": ("INT", {"default": 1, "min": 1, "max": 100, "tooltip": "Save checkpoint every N epochs. Ignored if save_every_steps > 0."}),
+                 "save_every_steps": ("INT", {"default": 0, "min": 0, "max": 100000, "tooltip": "Save checkpoint every N steps. Set to 0 to use epoch-based saving instead."}),
                  # VRAM Optimizations
                  "mixed_precision": (["bf16", "fp16", "no"], {"default": "bf16", "tooltip": "Mixed precision training mode. bf16 recommended for modern GPUs."}),
                  "gradient_accumulation": ("INT", {"default": 4, "min": 1, "max": 32, "tooltip": "Accumulate gradients over N steps before updating. Effective batch size = batch_size * gradient_accumulation."}),
@@ -1040,7 +1040,7 @@ class Qwen3FineTune:
                      import importlib.metadata
                      importlib.metadata.version("flash_attn")
                      attn_impl = "flash_attention_2"
-                except:
+                except Exception:
                      pass
 
                 print(f"Using attention implementation: {attn_impl}")
@@ -1168,13 +1168,11 @@ class Qwen3FineTune:
                 end_epoch = start_epoch + epochs
                 print(f"Starting training from epoch {start_epoch + 1} to {end_epoch}...")
 
-                # Helper function to save a checkpoint
-                def save_checkpoint(checkpoint_name, current_step=None):
+                # Helper function to save a training checkpoint (minimal, for resume only)
+                def save_training_checkpoint(checkpoint_name):
+                    """Save minimal checkpoint for resuming training. Fast and disk-efficient."""
                     ckpt_path = os.path.join(full_output_dir, checkpoint_name)
-
-                    # Copy entire Base model directory (official approach)
-                    # This preserves exact config structure for proper loading
-                    shutil.copytree(init_model_path, ckpt_path, dirs_exist_ok=True)
+                    os.makedirs(ckpt_path, exist_ok=True)
 
                     # Save training weights
                     unwrapped = accelerator.unwrap_model(model)
@@ -1186,6 +1184,22 @@ class Qwen3FineTune:
                     # Save scheduler state for resume
                     if scheduler:
                         torch.save(scheduler.state_dict(), os.path.join(ckpt_path, "scheduler.pt"))
+
+                    print(f"Training checkpoint saved: {ckpt_path}")
+                    return ckpt_path
+
+                # Helper function to save final inference-ready model
+                def save_final_model(checkpoint_name):
+                    """Save complete model ready for inference. Includes all necessary files."""
+                    ckpt_path = os.path.join(full_output_dir, checkpoint_name)
+
+                    # Copy entire base model directory (preserves exact config structure)
+                    shutil.copytree(init_model_path, ckpt_path, dirs_exist_ok=True)
+
+                    # Remove the original model.safetensors (we'll create our own)
+                    original_safetensors = os.path.join(ckpt_path, "model.safetensors")
+                    if os.path.exists(original_safetensors):
+                        os.remove(original_safetensors)
 
                     # Modify config.json for custom voice
                     ckpt_cfg_path = os.path.join(ckpt_path, "config.json")
@@ -1200,7 +1214,8 @@ class Qwen3FineTune:
                     with open(ckpt_cfg_path, 'w', encoding='utf-8') as f:
                         json.dump(ckpt_cfg, f, indent=2, ensure_ascii=False)
 
-                    # Overwrite model.safetensors with finetuned weights + speaker embedding
+                    # Save finetuned weights with speaker embedding
+                    unwrapped = accelerator.unwrap_model(model)
                     state_dict = unwrapped.state_dict()
                     state_dict = {k: v.cpu() for k, v in state_dict.items()}
 
@@ -1216,7 +1231,7 @@ class Qwen3FineTune:
 
                     save_file(state_dict, os.path.join(ckpt_path, "model.safetensors"))
 
-                    print(f"Checkpoint saved: {ckpt_path}")
+                    print(f"Final model saved: {ckpt_path}")
                     return ckpt_path
 
                 # Calculate total optimizer steps and global step counter
@@ -1310,15 +1325,15 @@ class Qwen3FineTune:
                                     print(f"DEBUG: sub_talker_loss requires_grad: {sub_talker_loss.requires_grad}")
                             
                             accelerator.backward(loss)
-                            
+
                             if accelerator.sync_gradients:
                                 accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
-                                
+
                             optimizer.step()
                             if scheduler:
                                 scheduler.step()
                             optimizer.zero_grad()
-                            
+
                             epoch_loss += loss.item()
                             steps += 1
 
@@ -1333,23 +1348,27 @@ class Qwen3FineTune:
                                     print(status)
                                     send_status(status)
 
-                                # Save checkpoint every N steps (if enabled)
+                                # Step-based saving: only lightweight checkpoints during training
+                                # (final model is always saved as epoch_N after training loop)
                                 if save_every_steps > 0 and global_step % save_every_steps == 0:
                                     send_status(f"Saving checkpoint step {global_step}...")
-                                    save_checkpoint(f"step_{global_step}")
+                                    save_training_checkpoint(f"ckpt_step_{global_step}")
 
                     avg_loss = epoch_loss/steps if steps > 0 else 0
                     print(f"Epoch {epoch + 1}/{end_epoch} - Avg Loss: {avg_loss}")
                     send_status(f"Epoch {epoch + 1}/{end_epoch} - Loss: {avg_loss:.4f}")
 
-                    # Save checkpoint every N epochs (if enabled), or always save final epoch
-                    is_final_epoch = (epoch + 1) == end_epoch
-                    should_save = is_final_epoch or (save_every_epochs > 0 and (epoch + 1) % save_every_epochs == 0)
-                    if should_save:
-                        send_status(f"Saving checkpoint epoch {epoch + 1}...")
-                        save_checkpoint(f"epoch_{epoch + 1}")
+                    # Epoch-based saving: intermediate checkpoints only (final saved after loop)
+                    if save_every_steps == 0:
+                        is_final_epoch = (epoch + 1) == end_epoch
+                        should_save_checkpoint = ((epoch + 1) % save_every_epochs == 0) and not is_final_epoch
+                        if should_save_checkpoint:
+                            send_status(f"Saving checkpoint epoch {epoch + 1}...")
+                            save_training_checkpoint(f"ckpt_epoch_{epoch + 1}")
 
-                # Final output path (already saved by the epoch loop)
+                # Always save final model as epoch_N for consistent resume
+                send_status(f"Saving final model epoch {end_epoch}...")
+                save_final_model(f"epoch_{end_epoch}")
                 final_output_path = os.path.join(full_output_dir, f"epoch_{end_epoch}")
 
                 # Cleanup: free accelerator resources and synchronize CUDA
@@ -1367,7 +1386,7 @@ class Qwen3FineTune:
 class Qwen3AudioCompare:
     # Class-level cache for speaker encoder
     _speaker_encoder = None
-    _speaker_encoder_model = None
+    _speaker_encoder_cache_key = None
 
     @classmethod
     def INPUT_TYPES(s):
@@ -1392,7 +1411,7 @@ class Qwen3AudioCompare:
 
     def _load_speaker_encoder(self, model_repo, local_model_path=""):
         """Load only the speaker encoder from a Base model (not the full model)."""
-        from safetensors.torch import load_file
+        from safetensors import safe_open
         from qwen_tts.core.models.modeling_qwen3_tts import Qwen3TTSSpeakerEncoder
 
         # Get local model path - use provided path if non-empty, otherwise fall back to default
@@ -1402,7 +1421,7 @@ class Qwen3AudioCompare:
             model_path = get_local_model_path(model_repo)
 
         # Check if already cached (use resolved path as cache key)
-        if Qwen3AudioCompare._speaker_encoder is not None and Qwen3AudioCompare._speaker_encoder_model == model_path:
+        if Qwen3AudioCompare._speaker_encoder is not None and Qwen3AudioCompare._speaker_encoder_cache_key == model_path:
             return Qwen3AudioCompare._speaker_encoder
         if not os.path.exists(model_path):
             raise ValueError(f"Base model not found at {model_path}. Please download it first using Qwen3-TTS Loader.")
@@ -1412,6 +1431,10 @@ class Qwen3AudioCompare:
         with open(config_path, 'r', encoding='utf-8') as f:
             config_dict = json.load(f)
 
+        # Validate this is a Base model with speaker encoder
+        if "speaker_encoder_config" not in config_dict:
+            raise ValueError(f"Model at {model_path} does not contain speaker_encoder_config. Only Base models (e.g., Qwen3-TTS-12Hz-0.6B-Base) include the speaker encoder.")
+
         # Create speaker encoder config
         from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSSpeakerEncoderConfig
         speaker_config = Qwen3TTSSpeakerEncoderConfig(**config_dict["speaker_encoder_config"])
@@ -1419,16 +1442,13 @@ class Qwen3AudioCompare:
         # Instantiate speaker encoder
         speaker_encoder = Qwen3TTSSpeakerEncoder(speaker_config)
 
-        # Load only speaker encoder weights from safetensors
+        # Load only speaker encoder weights from safetensors (selective loading to save memory)
         safetensors_path = os.path.join(model_path, "model.safetensors")
-        all_weights = load_file(safetensors_path)
-
-        # Filter to only speaker_encoder weights and remove prefix
         speaker_weights = {}
-        for k, v in all_weights.items():
-            if k.startswith("speaker_encoder."):
-                new_key = k[len("speaker_encoder."):]
-                speaker_weights[new_key] = v
+        with safe_open(safetensors_path, framework="pt") as f:
+            for key in f.keys():
+                if key.startswith("speaker_encoder."):
+                    speaker_weights[key[len("speaker_encoder."):]] = f.get_tensor(key)
 
         speaker_encoder.load_state_dict(speaker_weights)
         speaker_encoder.eval()
@@ -1439,7 +1459,7 @@ class Qwen3AudioCompare:
 
         # Cache it (use resolved path as key)
         Qwen3AudioCompare._speaker_encoder = speaker_encoder
-        Qwen3AudioCompare._speaker_encoder_model = model_path
+        Qwen3AudioCompare._speaker_encoder_cache_key = model_path
 
         print(f"Loaded speaker encoder from {model_repo} ({len(speaker_weights)} weights)")
         return speaker_encoder
